@@ -1,0 +1,7 @@
+*.local
+*.log
+*.tmp
+evidence/
+output/
+.DS_Store
+Thumbs.db
