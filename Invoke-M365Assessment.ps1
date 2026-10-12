@@ -36,7 +36,7 @@ $ReadOnlyScopes = @(
 # Connect read-only, verify the session is real, and prove it's read-only.
 # ---------------------------------------------------------------------------
 function Connect-Assessment {
-    Connect-MgGraph -UseDeviceCode -Scopes $ReadOnlyScopes -NoWelcome | Out-Null
+    Connect-MgGraph -UseDeviceCode -Scopes $ReadOnlyScopes -NoWelcome
     $ctx = Get-MgContext
     if (-not $ctx -or -not $ctx.Account) {
         throw "Authentication failed - no active Microsoft Graph session. Aborting."
