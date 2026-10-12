@@ -8,7 +8,7 @@
       2. MFA registration coverage  (users with no MFA registered)
       3. License waste              (disabled-but-licensed accounts)
       4. Baseline protection        (Security Defaults + Conditional Access states)
-      5. Legacy authentication      (is it blocked?)
+      5. Legacy authentication      (is it blocked? detected by policy behavior, not name)
       6. External sharing posture   (SharePoint/OneDrive org setting)
 
     Prints a console summary AND writes a self-contained HTML report a non-technical
@@ -18,7 +18,7 @@
 .NOTES
     Author : Magic Ben Ventures
     Safety : read-only by design. Tenant-agnostic (assesses whichever tenant you sign in to).
-    Output : ./output/M365-Assessment-<timestamp>.html  (the output/ folder is git-ignored)
+    Output : <script folder>/output/M365-Assessment-<timestamp>.html  (output/ is git-ignored)
 #>
 
 # ---------------------------------------------------------------------------
@@ -34,6 +34,7 @@ $ReadOnlyScopes = @(
 
 # ---------------------------------------------------------------------------
 # Connect read-only, verify the session is real, and prove it's read-only.
+# (Connect-MgGraph is NOT piped to Out-Null, so the device-code prompt shows.)
 # ---------------------------------------------------------------------------
 function Connect-Assessment {
     Connect-MgGraph -UseDeviceCode -Scopes $ReadOnlyScopes -NoWelcome
@@ -50,9 +51,6 @@ function Connect-Assessment {
 
 # ---------------------------------------------------------------------------
 # Helper: build one structured finding.
-#   Items          = affected users / facts (one per line in output)
-#   Impact         = plain-English "why it matters" (client-facing)
-#   Recommendation = plain-English "what to do"     (client-facing)
 # ---------------------------------------------------------------------------
 function New-Finding {
     param(
@@ -132,15 +130,25 @@ function Get-BaselineFindings {
 
 # ---------------------------------------------------------------------------
 # Check 5 - Legacy authentication blocked?
+# Detected by BEHAVIOR (not by a fixed policy name): an enabled CA policy that
+# targets the legacy client-app types and blocks access. Works on any tenant,
+# including custom-named policies.
 # ---------------------------------------------------------------------------
 function Get-LegacyAuthFindings {
-    $leg = Get-MgIdentityConditionalAccessPolicy | Where-Object { $_.DisplayName -eq 'Block legacy authentication' }
-    if ($leg -and $leg.State -eq 'enabled') {
-        New-Finding -Check 'Legacy auth' -Severity 'Info' -Finding 'Legacy authentication is blocked' -Items @("Policy '$($leg.DisplayName)' = enabled") `
+    $ca = @(Get-MgIdentityConditionalAccessPolicy)
+    $blockers = @($ca | Where-Object {
+        $_.State -eq 'enabled' -and
+        $null -ne $_.GrantControls -and
+        ($_.GrantControls.BuiltInControls -contains 'block') -and
+        (($_.Conditions.ClientAppTypes -contains 'exchangeActiveSync') -or ($_.Conditions.ClientAppTypes -contains 'other'))
+    })
+    if ($blockers.Count -gt 0) {
+        $names = @($blockers | ForEach-Object { $_.DisplayName })
+        New-Finding -Check 'Legacy auth' -Severity 'Info' -Finding 'Legacy authentication is blocked' -Items $names `
             -Impact 'Legacy (older) sign-in protocols cannot use MFA, so attackers use them to bypass it. This control is correctly closing that back door.' `
             -Recommendation 'Keep legacy authentication blocked for all users. Grant narrow, time-limited exceptions only if a specific legacy application genuinely requires it.'
     } else {
-        New-Finding -Check 'Legacy auth' -Severity 'High' -Finding 'Legacy authentication NOT blocked' -Items @('No enabled policy blocking legacy auth found') `
+        New-Finding -Check 'Legacy auth' -Severity 'High' -Finding 'Legacy authentication NOT blocked' -Items @('No enabled Conditional Access policy blocks the legacy client-app types.') `
             -Impact 'Legacy (older) sign-in protocols cannot use MFA. While they are allowed, an attacker can use one to bypass MFA entirely with just a password.' `
             -Recommendation 'Block legacy authentication for all users via Conditional Access. Identify any legacy-dependent apps first and migrate or scope a temporary exception.'
     }
@@ -302,7 +310,7 @@ foreach ($f in $findings) {
 }
 Write-Host ""
 
-# ----- HTML client report -----
-$reportPath = Join-Path (Get-Location) ("output/M365-Assessment-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+# ----- HTML client report (always written next to this script, not the current folder) -----
+$reportPath = Join-Path $PSScriptRoot ("output/M365-Assessment-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 Export-HtmlReport -Findings $findings -TenantId (Get-MgContext).TenantId -Path $reportPath
 Write-Host ""
