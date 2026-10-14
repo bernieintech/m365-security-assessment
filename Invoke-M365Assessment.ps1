@@ -3,13 +3,15 @@
     Read-only Microsoft 365 / Microsoft Entra ID security assessment, with HTML client report.
 
 .DESCRIPTION
-    Connects to Microsoft Graph with READ-ONLY scopes and runs six checks:
+    Connects to Microsoft Graph with READ-ONLY scopes and runs eight checks:
       1. Global Administrators      (privileged-role sprawl)
       2. MFA registration coverage  (users with no MFA registered)
       3. License waste              (disabled-but-licensed accounts)
       4. Baseline protection        (Security Defaults + Conditional Access states)
       5. Legacy authentication      (is it blocked? detected by policy behavior, not name)
       6. External sharing posture   (SharePoint/OneDrive org setting)
+      7. Password expiry policy     (forced expiration is now an anti-pattern)
+      8. User app-consent posture   (can users self-consent? illicit-consent-grant risk)
 
     Prints a console summary AND writes a self-contained HTML report a non-technical
     owner can read, print, or email. Makes NO changes: requests only *.Read.All scopes
@@ -176,6 +178,66 @@ function Get-SharingFindings {
 }
 
 # ---------------------------------------------------------------------------
+# Check 7 - Password expiry policy
+# Microsoft (and NIST) now recommend passwords NEVER expire; forced rotation
+# leads to weaker, predictable passwords. "Never expire" == a domain
+# PasswordValidityPeriodInDays of 2147483647. Unset/null defaults to 90 (expiring).
+# ---------------------------------------------------------------------------
+function Get-PasswordExpiryFindings {
+    $domains  = @(Get-MgDomain)
+    $expiring = @($domains | Where-Object {
+        $null -eq $_.PasswordValidityPeriodInDays -or $_.PasswordValidityPeriodInDays -ne 2147483647
+    })
+    if ($expiring.Count -gt 0) {
+        $items = @($expiring | ForEach-Object {
+            $days = if ($null -eq $_.PasswordValidityPeriodInDays) { '90 (default)' } else { $_.PasswordValidityPeriodInDays }
+            "$($_.Id): passwords expire every $days day(s)"
+        })
+        New-Finding -Check 'Password expiry' -Severity 'Low' -Finding "$($expiring.Count) domain(s) force password expiration" -Items $items `
+            -Impact 'Forcing regular password changes backfires: people pick predictable variations (Spring2025, then Spring2026) and reuse them, which is easier for attackers to guess, not harder. Current Microsoft and NIST guidance is to stop scheduled expiration and rely on MFA, length, and leaked-password blocking instead.' `
+            -Recommendation 'Set passwords to never expire and strengthen the controls that actually stop account takeover: enforce MFA, require longer passphrases, and turn on leaked-password protection. Change passwords on evidence of compromise, not on a schedule.'
+    } else {
+        $items = @($domains | ForEach-Object { "$($_.Id): passwords set to never expire" })
+        New-Finding -Check 'Password expiry' -Severity 'Info' -Finding 'Passwords set to never expire (recommended)' -Items $items `
+            -Impact 'Passwords are not force-expired on a schedule, which aligns with current Microsoft and NIST guidance and avoids pushing users toward weak, predictable password patterns.' `
+            -Recommendation 'Keep this setting, and make sure the controls that truly prevent account takeover are in place: MFA for everyone, length/passphrase requirements, and leaked-password protection.'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Check 8 - User app-consent posture
+# Can an ordinary user grant a third-party app access to company data on their
+# own (the "illicit consent grant" attack)? Detected by the PRESENCE and BREADTH
+# of a self-consent policy, not by a fixed ID - Microsoft's built-in policy IDs
+# change over time (e.g. legacy -> low -> recommended / allow-consent-apps).
+# ---------------------------------------------------------------------------
+function Get-AppConsentFindings {
+    $pol      = Get-MgPolicyAuthorizationPolicy
+    $assigned = @($pol.DefaultUserRolePermissions.PermissionGrantPoliciesAssigned)
+    # Only "ManagePermissionGrantsForSelf.*" entries let an ordinary user self-consent.
+    # ("ManagePermissionGrantsForOwnedResource.*" cover Teams/owned apps - not this surface.)
+    $self   = @($assigned | Where-Object { $_ -like 'ManagePermissionGrantsForSelf.*' })
+    $legacy = @($self | Where-Object { $_ -like '*legacy*' })
+
+    if ($self.Count -eq 0) {
+        New-Finding -Check 'App consent' -Severity 'Info' -Finding 'User app-consent disabled (admin approval required)' `
+            -Items @('No user self-consent policy is assigned - users cannot grant apps access to company data on their own.') `
+            -Impact 'Requiring admin approval closes the "illicit consent grant" attack, where a user is tricked into authorizing an attacker-controlled app and handing over a token that survives password resets and bypasses MFA.' `
+            -Recommendation 'Keep user consent disabled and run an admin consent request workflow so an administrator reviews each app before it gets access.'
+    }
+    elseif ($legacy.Count -gt 0) {
+        New-Finding -Check 'App consent' -Severity 'High' -Finding 'Users can consent to ANY app (broad self-consent)' -Items $self `
+            -Impact 'Any user can authorize any third-party app to read mail and files. This is the "illicit consent grant" attack: a convincing phishing link leads to a genuine Microsoft consent prompt, the user clicks Accept, and the attacker receives a standing token - no password stolen, MFA bypassed.' `
+            -Recommendation 'Switch to "Do not allow user consent" (admin approval required), or at minimum restrict consent to low-impact permissions from verified publishers. Review existing app grants for anything unexpected.'
+    }
+    else {
+        New-Finding -Check 'App consent' -Severity 'Low' -Finding 'Users can self-consent to apps (restricted by Microsoft-managed guardrails)' -Items $self `
+            -Impact 'Users can still authorize some third-party apps themselves. Microsoft-managed guardrails block the riskiest permissions, but self-service consent keeps part of the "illicit consent grant" attack surface open - a user can still be tricked into approving an attacker-controlled app.' `
+            -Recommendation 'For the tightest posture, require admin approval for all app consent so an administrator reviews each app. If self-consent must stay, keep it limited to low-impact permissions from verified publishers and review granted apps periodically.'
+    }
+}
+
+# ---------------------------------------------------------------------------
 # HTML report
 # ---------------------------------------------------------------------------
 function ConvertTo-HtmlSafe {
@@ -287,7 +349,9 @@ $checks = @(
     'Get-LicenseWasteFindings',
     'Get-BaselineFindings',
     'Get-LegacyAuthFindings',
-    'Get-SharingFindings'
+    'Get-SharingFindings',
+    'Get-PasswordExpiryFindings',
+    'Get-AppConsentFindings'
 )
 
 $findings = foreach ($c in $checks) {
