@@ -1,6 +1,6 @@
 # M365 Security Assessment
 
-A **read-only** Microsoft 365 / Microsoft Entra ID security assessment tool, written in PowerShell on the Microsoft Graph SDK. It runs six high-value checks that small businesses most often fail, and produces both a console summary **and a clean, client-ready HTML report** — without making any changes to the tenant.
+A **read-only** Microsoft 365 / Microsoft Entra ID security assessment tool, written in PowerShell on the Microsoft Graph SDK. It runs eight high-value checks that small businesses most often fail, and produces both a console summary **and a clean, client-ready HTML report** — without making any changes to the tenant.
 
 Built as the automation layer behind a manual methodology: every check was first performed by hand in the admin portals, then reproduced here in read-only code.
 
@@ -14,6 +14,8 @@ Built as the automation layer behind a manual methodology: every check was first
 | 4 | Baseline protection | Are Security Defaults / Conditional Access actually enforced? |
 | 5 | Legacy authentication | Old protocols that bypass MFA entirely (detected by policy *behavior*, not by name) |
 | 6 | External sharing posture | Org-level SharePoint/OneDrive sharing set to "Anyone" (anonymous) |
+| 7 | Password expiry policy | Forced password expiration is now an anti-pattern (Microsoft/NIST) |
+| 8 | User app-consent posture | Can users self-consent to apps? (illicit-consent-grant risk; detected by *behavior*, not by policy ID) |
 
 ## The client report
 
@@ -28,7 +30,7 @@ The findings are generated as structured objects (`Check` / `Severity` / `Findin
 ## Design principles
 
 - **Read-only by design.** Requests only `*.Read.All` scopes. Every run verifies the active session and **refuses to run if any write scope is present** — the tool cannot change the tenant even if misconfigured.
-- **Least privilege.** Exactly five read scopes, each required by a specific check.
+- **Least privilege.** Exactly five read scopes for all eight checks — the two newest checks (password expiry, app consent) reuse scopes already requested, adding capability without adding privilege.
 - **Name-independent detection.** Checks look at policy *behavior* and settings, not hardcoded display names, so they work on tenants with custom-named policies.
 - **Fail loud, not silent.** The connection is re-verified each run, so a stale/expired token can never produce a misleading "all clear."
 - **Resilient.** Each check runs in isolation; one failure is recorded and the rest continue.
@@ -91,6 +93,8 @@ License waste      Medium   1 disabled-but-licensed account(s)
 Baseline           Info     Baseline protection posture
 Legacy auth        Info     Legacy authentication is blocked
 External sharing   High     Sharing set to 'externalUserAndGuestSharing'
+Password expiry    Info     Passwords set to never expire (recommended)
+App consent        Low      Users can self-consent to apps (restricted)
 ```
 
 ## Limitations / roadmap
@@ -98,7 +102,9 @@ External sharing   High     Sharing set to 'externalUserAndGuestSharing'
 - **Global Admins:** counts *active* role holders; admins who are only *eligible* via Privileged Identity Management (PIM) are not yet counted.
 - **External sharing:** reports the **org-level** posture. Enumerating per-file anonymous links across all sites requires SharePoint Advanced Management (licensed) and is out of scope for v1.
 - **Ghost accounts:** detection keys on *disabled + licensed*. Adding `SignInActivity` (inactivity) is the production upgrade for catching enabled-but-dormant accounts.
-- **Roadmap:** benchmark against Microsoft Identity Secure Score; app-only (certificate) authentication for unattended runs; an approval-gated agent wrapper with per-tenant scoped identity and full action logging.
+- **App consent:** reports whether users can self-consent and how broadly (behavior-based). Enumerating individual risky grants already in place is a deeper, per-app review beyond v1.
+- **Validated against Microsoft Identity Secure Score:** findings cross-checked against Microsoft's own benchmark — they align on every free, actionable identity recommendation, and the tool additionally flags cost/governance issues Secure Score does not score.
+- **Roadmap:** app-only (certificate) authentication for unattended runs; an approval-gated agent wrapper that proposes fixes, requests permission, remediates with least privilege, and reports back — with per-tenant scoped identity and full action logging.
 
 ## Skills applied
 
