@@ -39,7 +39,7 @@ $ReadOnlyScopes = @(
 # (Connect-MgGraph is NOT piped to Out-Null, so the device-code prompt shows.)
 # ---------------------------------------------------------------------------
 function Connect-Assessment {
-    Connect-MgGraph -UseDeviceCode -Scopes $ReadOnlyScopes -NoWelcome
+    . "$PSScriptRoot/app-config.ps1"; Connect-MgGraph -ClientId $ClientId -TenantId $TenantId -UseDeviceCode -Scopes $ReadOnlyScopes -NoWelcome
     $ctx = Get-MgContext
     if (-not $ctx -or -not $ctx.Account) {
         throw "Authentication failed - no active Microsoft Graph session. Aborting."
@@ -240,6 +240,54 @@ function Get-AppConsentFindings {
 # ---------------------------------------------------------------------------
 # HTML report
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Check 9 - Email authentication (SPF / DKIM / DMARC)
+# Reads the public DNS records that stop attackers from spoofing the domain's
+# email (the root of phishing and business email compromise). For each verified
+# tenant domain it checks SPF, a Microsoft 365 DKIM selector, and an enforcing
+# DMARC policy, then grades the posture. Uses dig (forge/Linux); for Windows,
+# swap Get-DnsRecord for Resolve-DnsName or a DNS-over-HTTPS call.
+# ---------------------------------------------------------------------------
+function Get-DnsRecord {
+    # Look up a DNS record, retrying so a transient empty answer is not
+    # mistaken for a missing record.
+    param([string]$Name, [string]$Type = 'TXT', [int]$Tries = 3)
+    for ($i = 1; $i -le $Tries; $i++) {
+        $out = dig +short $Type $Name 2>$null
+        if ($out) { return ($out -join ' ') }
+        Start-Sleep -Milliseconds 400
+    }
+    return ''
+}
+
+function Get-EmailAuthFindings {
+    $domains = @(Get-MgDomain | Where-Object { $_.IsVerified })
+    $rank  = @{ Info = 0; Low = 1; Medium = 2; High = 3 }
+    $worst = 'Info'
+    $items = foreach ($d in $domains) {
+        $name = $d.Id
+        $spf  = [bool]((Get-DnsRecord $name TXT) -match 'v=spf1')
+        $dkim = $false
+        foreach ($sel in 'selector1','selector2') {
+            $sn = "$sel._domainkey.$name"
+            if ((Get-DnsRecord $sn TXT) -or (Get-DnsRecord $sn CNAME)) { $dkim = $true; break }
+        }
+        $dmarcText = Get-DnsRecord "_dmarc.$name" TXT
+        $dmarc     = [bool]($dmarcText -match 'v=DMARC1')
+        $policy    = if ($dmarcText -match 'p=(\w+)') { $Matches[1] } else { 'absent' }
+        $enforcing = $policy -in 'quarantine','reject'
+        $dsev = if (-not $spf -and -not $enforcing)             { 'High' }
+                elseif (-not $dmarc -or $policy -eq 'none')     { 'Medium' }
+                elseif (-not ($spf -and $dkim -and $enforcing)) { 'Low' }
+                else                                            { 'Info' }
+        if ($rank[$dsev] -gt $rank[$worst]) { $worst = $dsev }
+        "{0}: SPF={1}, DKIM={2}, DMARC={3} (policy: {4}) -> {5}" -f $name,$spf,$dkim,$dmarc,$policy,$dsev
+    }
+    if ($domains.Count -eq 0) { $items = @('No verified domains found.') }
+    New-Finding -Check 'Email authentication' -Severity $worst -Finding "SPF/DKIM/DMARC posture across $($domains.Count) domain(s)" -Items $items `
+        -Impact 'Email has no built-in sender verification, so without SPF, DKIM, and an enforcing DMARC policy an attacker can send mail that appears to come from the company. This is the basis of phishing and business email compromise (fake-executive wire fraud), and a core cyber-insurance question.' `
+        -Recommendation 'For each domain, publish an SPF record of approved senders (ending in -all), enable DKIM signing, and publish a DMARC policy - start at p=quarantine, review the reports, then move to p=reject.'
+}
 function ConvertTo-HtmlSafe {
     param([string]$Text)
     if ($null -eq $Text) { return '' }
@@ -320,7 +368,7 @@ $($tiles -join "`n")
 </div>
 
 <div class="intro">
-This report summarizes a <strong>read-only</strong> security assessment of your Microsoft 365 environment across six high-impact areas. Each finding below shows what was observed, why it matters to your business, and a recommended action. <strong>No changes were made to your tenant</strong> during this assessment.
+This report summarizes a <strong>read-only</strong> security assessment of your Microsoft 365 environment across the security areas below. Each finding below shows what was observed, why it matters to your business, and a recommended action. <strong>No changes were made to your tenant</strong> during this assessment.
 </div>
 
 $($cards -join "`n")
@@ -351,7 +399,8 @@ $checks = @(
     'Get-LegacyAuthFindings',
     'Get-SharingFindings',
     'Get-PasswordExpiryFindings',
-    'Get-AppConsentFindings'
+    'Get-AppConsentFindings',
+    'Get-EmailAuthFindings'
 )
 
 $findings = foreach ($c in $checks) {
