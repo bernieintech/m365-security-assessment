@@ -5,3 +5,4 @@ evidence/
 output/
 .DS_Store
 Thumbs.db
+app-config.ps1
