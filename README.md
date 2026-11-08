@@ -1,6 +1,6 @@
 # M365 Security Assessment
 
-A **read-only** Microsoft 365 / Microsoft Entra ID security assessment tool, written in PowerShell on the Microsoft Graph SDK. It runs eight high-value checks that small businesses most often fail, and produces both a console summary **and a clean, client-ready HTML report** — without making any changes to the tenant.
+A **read-only** Microsoft 365 / Microsoft Entra ID security assessment tool, written in PowerShell on the Microsoft Graph SDK. It runs nine high-value checks that small businesses most often fail, and produces both a console summary **and a clean, client-ready HTML report** — without making any changes to the tenant.
 
 Built as the automation layer behind a manual methodology: every check was first performed by hand in the admin portals, then reproduced here in read-only code.
 
@@ -16,6 +16,7 @@ Built as the automation layer behind a manual methodology: every check was first
 | 6 | External sharing posture | Org-level SharePoint/OneDrive sharing set to "Anyone" (anonymous) |
 | 7 | Password expiry policy | Forced password expiration is now an anti-pattern (Microsoft/NIST) |
 | 8 | User app-consent posture | Can users self-consent to apps? (illicit-consent-grant risk; detected by *behavior*, not by policy ID) |
+| 9 | Email authentication | Missing SPF / DKIM / DMARC lets attackers spoof your domain — the basis of phishing and business email compromise, and a core cyber-insurance control |
 
 ## The client report
 
@@ -30,7 +31,8 @@ The findings are generated as structured objects (`Check` / `Severity` / `Findin
 ## Design principles
 
 - **Read-only by design.** Requests only `*.Read.All` scopes. Every run verifies the active session and **refuses to run if any write scope is present** — the tool cannot change the tenant even if misconfigured.
-- **Least privilege.** Exactly five read scopes for all eight checks — the two newest checks (password expiry, app consent) reuse scopes already requested, adding capability without adding privilege.
+- **Scoped identity.** Signs in through a dedicated, read-only Entra app registration whose `ClientId` and `TenantId` live in a git-ignored `app-config.ps1`, so the tool's own identity can never hold a write permission.
+- **Least privilege.** Exactly five read scopes power all nine checks — later checks reuse scopes already requested (the email-authentication check reads public DNS and needs none), adding capability without adding privilege.
 - **Name-independent detection.** Checks look at policy *behavior* and settings, not hardcoded display names, so they work on tenants with custom-named policies.
 - **Fail loud, not silent.** The connection is re-verified each run, so a stale/expired token can never produce a misleading "all clear."
 - **Resilient.** Each check runs in isolation; one failure is recorded and the rest continue.
@@ -42,7 +44,8 @@ The findings are generated as structured objects (`Check` / `Severity` / `Findin
 
 - PowerShell 7+ (`pwsh`)
 - Microsoft Graph PowerShell SDK sub-modules (v2.41.1+, matching versions): `Authentication`, `Users`, `Identity.DirectoryManagement`, `Identity.SignIns`, `Reports`, `Sites`
-- An account with read access to directory, policy, reports, and SharePoint tenant settings (Global Reader or equivalent)
+- `dig` for the email-authentication check (Linux: `sudo apt install dnsutils`; ships with most Unix systems)
+- A dedicated **read-only app registration** (public client) and an account with read access to directory, policy, reports, and SharePoint tenant settings (Global Reader or equivalent)
 
 **Install PowerShell 7**
 
@@ -57,7 +60,7 @@ Install-Module Microsoft.Graph.Users, Microsoft.Graph.Identity.DirectoryManageme
                -RequiredVersion 2.41.1 -Scope CurrentUser -Repository PSGallery
 ```
 
-> Tip: the full `Microsoft.Graph` meta-module is large; installing only these sub-modules is faster and lighter. If a temp-space error appears on Linux, point temp at a roomier disk first: `$env:TMPDIR = "$HOME/pstmp"` (and `New-Item -ItemType Directory -Force -Path $env:TMPDIR`).
+**Configure your app registration.** Copy `app-config.example.ps1` to `app-config.ps1` and fill in your read-only app registration's `ClientId` and `TenantId`. The real `app-config.ps1` is git-ignored and is never committed.
 
 ## Usage
 
@@ -65,7 +68,7 @@ Install-Module Microsoft.Graph.Users, Microsoft.Graph.Identity.DirectoryManageme
 pwsh ./Invoke-M365Assessment.ps1
 ```
 
-On first run it signs in with the **device-code flow** (headless-friendly: open the shown URL, enter the code) and requests read-only consent. Later runs reuse the cached token. The tool prints a summary to the console and writes the HTML report to `output/`.
+On first run it signs in through your configured app registration with the **device-code flow** (open the shown URL, enter the code) and requests read-only consent. Later runs reuse the cached token. The tool prints a summary to the console and writes the HTML report to `output/`.
 
 ### Scopes requested (all read-only)
 
@@ -85,16 +88,17 @@ Connected as admin@contoso.onmicrosoft.com  [read-only verified]
 ===== M365 / Entra Security Assessment =====
 Tenant: <tenant-guid>   Run: 2026-01-01 12:00:00
 
-Check              Severity Finding
------              -------- -------
-Global Admins      High     3 Global Administrator(s)
-MFA coverage       Medium   9 user(s) with no MFA registered
-License waste      Medium   1 disabled-but-licensed account(s)
-Baseline           Info     Baseline protection posture
-Legacy auth        Info     Legacy authentication is blocked
-External sharing   High     Sharing set to 'externalUserAndGuestSharing'
-Password expiry    Info     Passwords set to never expire (recommended)
-App consent        Low      Users can self-consent to apps (restricted)
+Check                Severity Finding
+-----                -------- -------
+Global Admins        Info     2 Global Administrator(s)
+MFA coverage         Medium   9 user(s) with no MFA registered
+License waste        Info     0 disabled-but-licensed account(s)
+Baseline             Info     Baseline protection posture
+Legacy auth          Info     Legacy authentication is blocked
+External sharing     Low      Sharing set to 'externalUserSharingOnly'
+Password expiry      Info     Passwords set to never expire (recommended)
+App consent          Low      Users can self-consent to apps (restricted)
+Email authentication Medium   SPF/DKIM/DMARC posture across 1 domain(s)
 ```
 
 ## Limitations / roadmap
@@ -103,12 +107,13 @@ App consent        Low      Users can self-consent to apps (restricted)
 - **External sharing:** reports the **org-level** posture. Enumerating per-file anonymous links across all sites requires SharePoint Advanced Management (licensed) and is out of scope for v1.
 - **Ghost accounts:** detection keys on *disabled + licensed*. Adding `SignInActivity` (inactivity) is the production upgrade for catching enabled-but-dormant accounts.
 - **App consent:** reports whether users can self-consent and how broadly (behavior-based). Enumerating individual risky grants already in place is a deeper, per-app review beyond v1.
+- **Email authentication:** DKIM is checked at the Microsoft 365 default selectors (`selector1` / `selector2`); a domain that signs with a different selector may read as not-found. Uses `dig`; a cross-platform DNS lookup is the portability upgrade.
 - **Validated against Microsoft Identity Secure Score:** findings cross-checked against Microsoft's own benchmark — they align on every free, actionable identity recommendation, and the tool additionally flags cost/governance issues Secure Score does not score.
 - **Roadmap:** app-only (certificate) authentication for unattended runs; an approval-gated agent wrapper that proposes fixes, requests permission, remediates with least privilege, and reports back — with per-tenant scoped identity and full action logging.
 
 ## Skills applied
 
-Microsoft Entra ID / Microsoft 365 administration · Microsoft Graph API & PowerShell SDK · Conditional Access · identity & access management · least privilege · PowerShell scripting (functions, structured objects, error handling, HTML generation) · security assessment methodology (Observation / Evidence / Conclusion / Action) · Git/GitHub PR workflow with protected branches.
+Microsoft Entra ID / Microsoft 365 administration · Microsoft Graph API & PowerShell SDK · Conditional Access · email authentication (SPF/DKIM/DMARC) · identity & access management · least privilege · PowerShell scripting (functions, structured objects, error handling, HTML generation) · security assessment methodology (Observation / Evidence / Conclusion / Action) · Git/GitHub PR workflow with protected branches.
 
 Maps to **CompTIA Security+** (IAM, least privilege, hardening, logging) and **Microsoft AZ-800** (Entra identity, Conditional Access, Graph administration).
 
